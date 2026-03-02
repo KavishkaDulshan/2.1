@@ -49,7 +49,9 @@ void runDemo() {
   static unsigned long lastChange = 0;
   static int state = 0;
 
-  if (millis() - lastChange > 6000) {
+  // Give SLEEPY more time so the full droop->close->fight->open cycle plays
+  unsigned long stateTime = (state == 2) ? 12000 : 6000;
+  if (millis() - lastChange > stateTime) {
     state++;
     if (state > 5) state = 0;
     switch(state) {

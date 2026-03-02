@@ -84,7 +84,7 @@ void RobotEyes::update() {
           sleepyLidHeight = 0.05f; targetY = 0;
           sleepPhase = 1; sleepPhaseTimer = now; break;
         case 1: {
-          sleepyLidHeight += 0.004f;
+          sleepyLidHeight += 0.010f;  // faster droop so full cycle fits in demo
           targetY = sleepyLidHeight * 22.0f;
           if (sleepyLidHeight < 0.45f && (now - lastMicroDrift > 2000)) {
             sleepMicroTargetX = random(-5, 5); lastMicroDrift = now;
@@ -176,27 +176,40 @@ void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side) {
     return;
   }
 
-  // ---- SLEEPY: asymmetric drooping lid (nasal > temple) ----
+  // ---- SLEEPY: smooth curved eyelid via large-circle arc from above ----
+  // A large black circle centered above droops its bottom arc into the eye,
+  // forming a soft organic eyelid curve — nothing like ANGRY sharp triangles.
   if (currentEmotion == SLEEPY) {
     int eyeTop = y - eyeH / 2;
+
+    // 1. Full white eye base
     spr->fillRoundRect(x - eyeW/2, eyeTop, eyeW, eyeH, eyeR, TFT_WHITE);
-    int inner = (int)(eyeH * sleepyLidHeight);
-    int outer = (int)(inner * 0.60f);
-    int eL = x - eyeW/2 - 1, eR = x + eyeW/2 + 1, abv = eyeTop - 3;
-    if (side == -1) {
-      spr->fillTriangle(eL, abv, eR, abv, eR, eyeTop + inner, TFT_BLACK);
-      spr->fillTriangle(eL, abv, eR, eyeTop + inner, eL, eyeTop + outer, TFT_BLACK);
-    } else {
-      spr->fillTriangle(eL, abv, eR, abv, eL, eyeTop + inner, TFT_BLACK);
-      spr->fillTriangle(eL, eyeTop + inner, eR, abv, eR, eyeTop + outer, TFT_BLACK);
-    }
-    int visH = eyeH - inner;
+
+    // 2. Curved eyelid — large circle whose bottom arc IS the lid line
+    int lidR = 44;   // large radius = gentle, natural eyelid curvature
+
+    // Lid center Y: as sleepyLidHeight goes 0->1, circle sinks into the eye
+    int lidCY = eyeTop - lidR + (int)(eyeH * sleepyLidHeight);
+
+    // Subtle asymmetry: inner/nasal corner droops slightly more
+    // side=-1 (left): inner=right, shift circle right; side=1 (right): shift left
+    int lidCX = x + (-side) * (int)(sleepyLidHeight * 5);
+
+    spr->fillCircle(lidCX, lidCY, lidR, TFT_BLACK);
+
+    // 3. Pupil in the visible slit below the lid
+    // Lid bottom at eye center = eyeTop + eyeH*sleepyLidHeight
+    int lidLineY = eyeTop + (int)(eyeH * sleepyLidHeight);
+    int visH    = y + eyeH/2 - lidLineY;
+
     if (visH > 8) {
       int pX = x + (int)curX + (int)sleepMicroDriftX;
-      int pY = constrain(y + (int)curY, eyeTop + inner + pupilR + 2, y + eyeH/2 - pupilR - 2);
-      int effR = (visH < 22) ? max(4, pupilR - (22 - visH) / 3) : pupilR;
+      int visTop = lidLineY + pupilR + 2;
+      int visBot = y + eyeH/2 - pupilR - 2;
+      int pY = constrain(y + (int)curY, visTop, visBot);
+      int effR = (visH < 24) ? max(4, pupilR - (24 - visH) / 3) : pupilR;
       spr->fillCircle(pX, pY, effR, TFT_BLACK);
-      if (visH > 16) spr->fillCircle(pX + 3, pY - 2, 2, TFT_WHITE);
+      if (visH > 18) spr->fillCircle(pX + 3, pY - 2, 2, TFT_WHITE);
     }
     return;
   }
@@ -223,14 +236,21 @@ void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side) {
   // ---- INNOCENT: big pupils, upward gaze, large sparkle catchlights ----
   if (currentEmotion == INNOCENT) {
     int h = max(2, (int)(eyeH * (1.0f - blinkState)));
-    spr->fillRoundRect(x - eyeW/2, y - h/2, eyeW, h, eyeR, TFT_WHITE);
-    if (h > 8) {
-      int bigR = pupilR + 3 + (int)(sin(innocentPulseAngle) * 1.0f);
+    // Clamp corner radius so fillRoundRect never gets radius > h/2 (avoids glitch)
+    int rr = min(eyeR, max(1, h / 2 - 1));
+    spr->fillRoundRect(x - eyeW/2, y - h/2, eyeW, h, rr, TFT_WHITE);
+    // Shrink pupil to fit inside the current blink height
+    int bigR = pupilR + 3 + (int)(sin(innocentPulseAngle) * 1.0f);
+    bigR = min(bigR, h / 2 - 2);  // clamp: pupil must fit inside eye height
+    if (bigR >= 2) {
       int pX = constrain(x + (int)curX, x - eyeW/2 + bigR + 1, x + eyeW/2 - bigR - 1);
       int pY = constrain(y + (int)curY, y - h/2 + bigR + 1, y + h/2 - bigR - 1);
       spr->fillCircle(pX, pY, bigR, TFT_BLACK);
-      spr->fillCircle(pX + 4, pY - 4, 4, TFT_WHITE);
-      spr->fillCircle(pX - 3, pY + 3, 2, TFT_WHITE);
+      // Only draw catchlights when eye is wide enough to contain them cleanly
+      if (h > bigR * 2 + 6) {
+        spr->fillCircle(pX + 4, pY - 4, 4, TFT_WHITE);
+        spr->fillCircle(pX - 3, pY + 3, 2, TFT_WHITE);
+      }
     }
     return;
   }
