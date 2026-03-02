@@ -22,6 +22,7 @@ build/
 .vscode/
 .vs/
 .idea/
+/tmpclaude*
 
 # OS files
 .DS_Store
