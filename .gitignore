@@ -1,0 +1,43 @@
+# Git ignore for Arduino / ESP32 project
+
+# Build artifacts
+/build/
+build/
+.pio/
+.pioenvs/
+.arduinoIDE/
+
+# Compiled binaries and objects
+*.bin
+*.hex
+*.elf
+*.map
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+
+# IDEs and editors
+.vscode/
+.vs/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Generated compile files
+compile_commands.json
+compile_result.json
+sdkconfig
+
+# Other
+*.cache
+.env
+.history
