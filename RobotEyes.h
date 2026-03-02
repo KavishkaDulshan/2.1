@@ -61,6 +61,8 @@ class RobotEyes {
     void draw(LGFX_Sprite *spr);
     void lookAt(float x, float y);
     void setEmotion(Emotion e);
+    Emotion getEmotion() { return currentEmotion; } 
+
 
   private:
     void drawEye(LGFX_Sprite *spr, int x, int y, int side);
