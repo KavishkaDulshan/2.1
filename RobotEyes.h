@@ -57,6 +57,9 @@ class RobotEyes {
     float innocentPulseAngle = 0.0;
     float dizzyAngle = 0.0;
 
+    // Transition blink (smooth crossfade on emotion switch)
+    float transitionBlink = 0.0f;
+
   public:
     void init();
     void update();

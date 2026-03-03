@@ -10,6 +10,7 @@ void RobotEyes::setEmotion(Emotion e)
   currentEmotion = e;
   blinkState = 0;
   isBlinking = false;
+  transitionBlink = 0.45f; // Quick blink on every emotion switch
 
   if (e == SLEEPY)
   {
@@ -100,6 +101,12 @@ void RobotEyes::update()
   // Smooth movement for Whole Eye Offset
   eyeOffsetX += (targetEyeOffsetX - eyeOffsetX) * 0.15f;
   eyeOffsetY += (targetEyeOffsetY - eyeOffsetY) * 0.15f;
+
+  // Decay transition blink
+  if (transitionBlink > 0) {
+    transitionBlink -= 0.10f;
+    if (transitionBlink < 0) transitionBlink = 0;
+  }
 
   unsigned long now = millis();
 
@@ -327,6 +334,15 @@ void RobotEyes::draw(LGFX_Sprite *spr)
 
   drawEye(spr, centerX - eyeGap, drawY, -1);
   drawEye(spr, centerX + eyeGap, drawY, 1);
+
+  // Smile mouth for HAPPY (∪ crescent shape)
+  if (currentEmotion == HAPPY)
+  {
+    int mR = 5;
+    int mY = constrain(drawY + eyeH / 2 + 4, mR, 63 - mR);
+    spr->fillCircle(centerX, mY, mR, TFT_WHITE);
+    spr->fillRect(centerX - mR, mY - mR, mR * 2 + 1, mR, TFT_BLACK);
+  }
 }
 
 void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side)
@@ -334,9 +350,49 @@ void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side)
   // HAPPY
   if (currentEmotion == HAPPY)
   {
-    int happyH = (happyBlinkState > 0) ? max(3, (int)(eyeH * (1.0f - happyBlinkState * 0.85f))) : eyeH;
-    spr->fillRoundRect(x - eyeW / 2, y - happyH / 2, eyeW, happyH, eyeR, TFT_WHITE);
-    spr->fillCircle(x, y + happyH / 2 + 2, (eyeW + 8 + (happyBounceY > 1.5f ? 2 : 0)) / 2, TFT_BLACK);
+    float effectiveBlink = max(happyBlinkState, transitionBlink);
+    // Squish vertically at bounce peak for a springy feel
+    int squish = (int)(max(0.0f, happyBounceY) * 0.4f);
+    int rawH   = eyeH - squish;
+    int happyH = (effectiveBlink > 0) ? max(3, (int)(rawH * (1.0f - effectiveBlink * 0.90f))) : rawH;
+    int rr     = min(eyeR, happyH / 2 - 1);
+
+    // Main eye: wide-open rounded rectangle
+    spr->fillRoundRect(x - eyeW / 2, y - happyH / 2, eyeW, happyH, rr, TFT_WHITE);
+
+    if (happyH > 10 && effectiveBlink < 0.6f)
+    {
+      // Large upward-gazing pupil in upper portion
+      int pX = x + 1;
+      int pY = y - happyH / 6;
+      int pR = 9;
+      pY = constrain(pY, y - happyH / 2 + pR + 2, y + happyH / 2 - pR - 2);
+      spr->fillCircle(pX, pY, pR, TFT_BLACK);
+
+      // Primary catchlight (upper-left, large)
+      spr->fillCircle(pX - 3, pY - 4, 3, TFT_WHITE);
+      // Secondary catchlight (lower-right, small)
+      spr->fillCircle(pX + 4, pY + 2, 1, TFT_WHITE);
+
+      // Cheek blush: clear horizontal row of 3 dots below eye, outer side
+      int chBaseX = x + side * (eyeW / 2 - 6);
+      int chY     = y + happyH / 2 + 6;
+      for (int i = 0; i < 3; i++) {
+        spr->fillCircle(chBaseX + side * i * 4, chY, 2, TFT_WHITE);
+      }
+
+      // Corner star sparkle: 3-line cross at outer upper corner
+      int spX = x + side * (eyeW / 2 + 4);
+      int spY = y - happyH / 2 - 3;
+      spr->drawLine(spX - 3, spY,     spX + 3, spY,     TFT_WHITE); // horizontal
+      spr->drawLine(spX,     spY - 3, spX,     spY + 3, TFT_WHITE); // vertical
+      spr->drawLine(spX - 2, spY - 2, spX + 2, spY + 2, TFT_WHITE); // diagonal
+
+      // Orbiting shimmer dot: figure-eight path around the eye
+      int sX = x + (int)(cos(happyShimmerAngle) * (eyeW / 2 + 6));
+      int sY = (y - happyH / 3) + (int)(sin(happyShimmerAngle * 2.0f) * 6);
+      spr->fillCircle(sX, sY, 1, TFT_WHITE);
+    }
     return;
   }
 
@@ -364,8 +420,9 @@ void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side)
     return;
   }
 
-  // STANDARD RENDERING (Neutral, Angry, Sad, Dizzy, Wakeup)
-  int h = max(2, (int)(eyeH * (1.0f - blinkState)));
+  // STANDARD RENDERING (Neutral, Angry, Sad, Dizzy, Wakeup, Innocent)
+  float effectiveBlink = max(blinkState, transitionBlink);
+  int h = max(2, (int)(eyeH * (1.0f - effectiveBlink)));
   spr->fillRoundRect(x - eyeW / 2, y - h / 2, eyeW, h, eyeR, TFT_WHITE);
 
   if (h > 8)
