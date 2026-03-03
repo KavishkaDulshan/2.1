@@ -106,8 +106,24 @@ void loop() {
 
   bool isTouched = (digitalRead(TOUCH_PIN) == HIGH);
   static bool wasTouched = false;
-  static unsigned long touchHoldStart = 0;
-  static bool wasLongPress = false;
+
+  // Double-tap detection for INNOCENT activation (two taps within 500ms)
+  static unsigned long lastTapTime = 0;
+  static int tapCount = 0;
+  bool risingEdge = isTouched && !wasTouched;
+
+  if (risingEdge) {
+      unsigned long tapNow = millis();
+      if (tapCount > 0 && (tapNow - lastTapTime < 500)) {
+          tapCount++;
+      } else {
+          tapCount = 1;
+      }
+      lastTapTime = tapNow;
+  }
+  if (tapCount > 0 && (millis() - lastTapTime > 500)) {
+      tapCount = 0; // Window expired
+  }
 
   Emotion curEmotion = eyes.getEmotion();
 
@@ -115,22 +131,26 @@ void loop() {
 
   bool isSleeping = (curEmotion == SLEEPY || curEmotion == ASLEEP);
 
-  // Track how long the finger has been held
-  if (isTouched) {
-      if (touchHoldStart == 0) touchHoldStart = millis();
-  } else {
-      if (touchHoldStart != 0) {
-          // Finger just lifted
-          if (innocentOverride) {
-              innocentReleaseTime = millis(); // Start 3s post-release timer
-          }
-          touchHoldStart = 0;
-          wasLongPress   = false;
+  // Finger lift: start INNOCENT post-release timer and clear transition flags
+  if (!isTouched && wasTouched) {
+      if (innocentOverride) {
+          innocentReleaseTime = millis(); // Start 3s post-release timer
       }
-      wakeupFromTouch = false;   // finger lifted – clear the transition flag
+      wakeupFromTouch = false;
   }
 
-  // A. Touch wakes → WAKEUP animation first, then HAPPY / long-press → INNOCENT
+  // D. Double-tap while awake → INNOCENT
+  if (tapCount >= 2 && !innocentOverride && !isSleeping
+      && curEmotion != ANGRY && curEmotion != DIZZY) {
+      eyes.setEmotion(INNOCENT);
+      emotionOverrideTimer = millis();
+      hasEmotionOverride   = true;
+      innocentOverride     = true;
+      innocentReleaseTime  = 0;
+      tapCount = 0;
+  }
+
+  // A. Touch wakes → WAKEUP animation first, then HAPPY
   if (isTouched) {
       lastInteractionTime = millis();     // touch always resets idle timer
 
@@ -159,26 +179,17 @@ void loop() {
               wakeupFromTouch      = false;
           }
       } else if (curEmotion == INNOCENT && innocentOverride) {
-          // Already in INNOCENT from long-press – keep it alive while touching
+          // INNOCENT active – keep it alive while touching
           emotionOverrideTimer = millis();
-          wasLongPress = true;
-      } else if (curEmotion != ANGRY && curEmotion != DIZZY && curEmotion != WAKEUP) {
-          // Check for 5s long-press → INNOCENT
-          if (!wasLongPress && (millis() - touchHoldStart > 5000)) {
-              eyes.setEmotion(INNOCENT);
+      } else if (curEmotion != ANGRY && curEmotion != DIZZY
+                 && curEmotion != WAKEUP && !innocentOverride) {
+          // Single touch while awake → HAPPY
+          if (curEmotion != HAPPY) {
+              eyes.setEmotion(HAPPY);
               emotionOverrideTimer = millis();
               hasEmotionOverride   = true;
-              innocentOverride     = true;
-              wasLongPress         = true;
-          } else if (!innocentOverride) {
-              // Short touch while awake → HAPPY (only switch if not already happy)
-              if (curEmotion != HAPPY) {
-                  eyes.setEmotion(HAPPY);
-                  emotionOverrideTimer = millis();
-                  hasEmotionOverride   = true;
-              } else {
-                  emotionOverrideTimer = millis(); // Refresh timer to keep HAPPY alive
-              }
+          } else {
+              emotionOverrideTimer = millis(); // Refresh timer to keep HAPPY alive
           }
       }
   }
@@ -263,6 +274,20 @@ void loop() {
       unsigned long t = millis();
       int wave = 120 + (int)(abs(sin(t / 70.0)) * 110);
       analogWrite(VIBE_PIN, ((t / 110) % 3 == 0) ? wave : 0);
+
+  } else if (curEmotion == SLEEPY) {
+      // Gentle breathing pulse: short thump every ~2s
+      unsigned long sp = millis() % 2000;
+      if      (sp < 150) analogWrite(VIBE_PIN, (int)(sp / 150.0f * 90));
+      else if (sp < 300) analogWrite(VIBE_PIN, (int)((300 - sp) / 150.0f * 90));
+      else               analogWrite(VIBE_PIN, 0);
+
+  } else if (curEmotion == ASLEEP) {
+      // Very slow deep-sleep breathing pulse every ~3.5s
+      unsigned long sp = millis() % 3500;
+      if      (sp < 200) analogWrite(VIBE_PIN, (int)(sp / 200.0f * 65));
+      else if (sp < 400) analogWrite(VIBE_PIN, (int)((400 - sp) / 200.0f * 65));
+      else               analogWrite(VIBE_PIN, 0);
 
   } else {
       analogWrite(VIBE_PIN, 0);

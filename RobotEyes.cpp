@@ -11,6 +11,7 @@ void RobotEyes::setEmotion(Emotion e)
   blinkState = 0;
   isBlinking = false;
   transitionBlink = 0.45f; // Quick blink on every emotion switch
+  lastBlinkTime = millis(); // Prevent double-blink after transition
 
   if (e == SLEEPY)
   {
@@ -289,12 +290,14 @@ void RobotEyes::update()
   // --- INNOCENT ---
   if (currentEmotion == INNOCENT)
   {
-    innocentPulseAngle += 0.04f;
-    targetY = -5.0f;
+    innocentPulseAngle += 0.025f;
+    // Pupils gaze upward and sway gently side to side – alive and curious
+    targetY = -6.0f + sin(innocentPulseAngle * 0.4f) * 2.0f;
+    targetX = sin(innocentPulseAngle * 0.3f) * 5.0f;
   }
 
-  // Normal blink
-  float blinkSpeed = (currentEmotion == INNOCENT) ? 0.10f : 0.25f;
+  // Normal blink (INNOCENT uses slower, more deliberate blink speed)
+  float blinkSpeed = (currentEmotion == INNOCENT) ? 0.08f : 0.25f;
   if (!isBlinking && (now - lastBlinkTime > (unsigned long)blinkInterval))
   {
     isBlinking = true;
@@ -420,7 +423,37 @@ void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side)
     return;
   }
 
-  // STANDARD RENDERING (Neutral, Angry, Sad, Dizzy, Wakeup, Innocent)
+  // INNOCENT (big round eyes, large pupils, prominent catchlights, alive gaze)
+  if (currentEmotion == INNOCENT)
+  {
+    float eb  = max(blinkState, transitionBlink);
+    int   iH  = 46; // slightly taller than normal eyeH (42)
+    int   iHe = (eb > 0) ? max(3, (int)(iH * (1.0f - eb))) : iH;
+    int   rr  = min(eyeR + 3, iHe / 2 - 1);
+
+    spr->fillRoundRect(x - eyeW / 2, y - iHe / 2, eyeW, iHe, rr, TFT_WHITE);
+
+    if (iHe > 14 && eb < 0.6f)
+    {
+      int pR = 11; // large pupil
+      int pX = x + (int)curX;
+      int pY = constrain(y + (int)curY, y - iHe / 2 + pR + 2, y + iHe / 2 - pR - 2);
+      spr->fillCircle(pX, pY, pR, TFT_BLACK);
+
+      // Large primary catchlight (upper-left)
+      spr->fillCircle(pX - 4, pY - 5, 4, TFT_WHITE);
+      // Secondary catchlight (lower-right)
+      spr->fillCircle(pX + 4, pY + 3, 2, TFT_WHITE);
+
+      // Subtle shimmer dot orbiting slowly
+      int shX = x + (int)(cos(innocentPulseAngle) * (eyeW / 2 + 3));
+      int shY = y - iHe / 3 + (int)(sin(innocentPulseAngle * 1.5f) * 3);
+      spr->fillCircle(shX, shY, 1, TFT_WHITE);
+    }
+    return;
+  }
+
+  // STANDARD RENDERING (Neutral, Angry, Sad, Dizzy, Wakeup)
   float effectiveBlink = max(blinkState, transitionBlink);
   int h = max(2, (int)(eyeH * (1.0f - effectiveBlink)));
   spr->fillRoundRect(x - eyeW / 2, y - h / 2, eyeW, h, eyeR, TFT_WHITE);
