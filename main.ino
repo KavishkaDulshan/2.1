@@ -4,31 +4,34 @@
 #include <Wire.h>
 #include "RobotEyes.h"
 
-// --- CONFIG ---
-#define RX_PIN 18 // Camera RX
-#define TX_PIN 17 // Camera TX
+#define RX_PIN 18
+#define TX_PIN 17
 
-// Hardware Objects
 Adafruit_MPU6050 mpu;
 RobotEyes eyes;
 
-// Display Driver Setup
-class LGFX : public lgfx::LGFX_Device {
+class LGFX : public lgfx::LGFX_Device
+{
   lgfx::Panel_SH110x _panel_instance;
-  lgfx::Bus_I2C      _bus_instance;
+  lgfx::Bus_I2C _bus_instance;
+
 public:
-  LGFX(void) {
+  LGFX(void)
+  {
     {
       auto cfg = _bus_instance.config();
       cfg.i2c_port = 0;
       cfg.freq_write = 400000;
-      cfg.pin_sda = 4; cfg.pin_scl = 5; cfg.i2c_addr = 0x3C;
+      cfg.pin_sda = 4;
+      cfg.pin_scl = 5;
+      cfg.i2c_addr = 0x3C;
       _bus_instance.config(cfg);
       _panel_instance.setBus(&_bus_instance);
     }
     {
       auto cfg = _panel_instance.config();
-      cfg.panel_width = 128; cfg.panel_height = 64;
+      cfg.panel_width = 128;
+      cfg.panel_height = 64;
       cfg.offset_x = 2;
       _panel_instance.config(cfg);
     }
@@ -39,13 +42,15 @@ public:
 LGFX display;
 LGFX_Sprite sprite(&display);
 
-// Global Targets
-float camTargetX = 0.0;
-float camTargetY = 0.0;
+// Interaction Logic
+unsigned long lastInteractionTime = 0;
+unsigned long emotionOverrideTimer = 0;
+bool hasEmotionOverride = false; // True when Angry/Dizzy/Wakeup is playing
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  Serial1.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN); // Camera Link
+  Serial1.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
 
   display.init();
   display.setBrightness(128);
@@ -53,97 +58,158 @@ void setup() {
   sprite.setColorDepth(1);
   sprite.createSprite(128, 64);
   eyes.init();
-  
-  // Initialize MPU6050 on the shared I2C bus
-  if (!mpu.begin()) {
-    Serial.println("Failed to find MPU6050 chip! Check wiring.");
-  } else {
-    Serial.println("MPU6050 Found!");
+
+  if (!mpu.begin())
+  {
+    Serial.println("Failed to find MPU6050");
+  }
+  else
+  {
     mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
   }
-  
-  Serial.println("System Ready. Sensory Integration Active.");
+
+  lastInteractionTime = millis();
 }
 
-void loop() {
-  // 1. Read Camera Data (Vision)
-  processCameraData();
+void loop()
+{
+  bool cameraDetected = false;
+  bool physicallyMoved = false;
 
-  // 2. Read MPU6050 Data (Balance/Vestibular)
+  // 1. Process Camera (Controls Pupil Only - does NOT wake from sleep)
+  cameraDetected = processCameraData();
+
+  // 2. Process MPU6050 (Controls Base Offset & Physical Reactions)
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
-  // --- PHYSICS ENGINE: TILT & SHAKE ---
-  
-  // A. Shake Detection (Total Acceleration Vector)
-  // Gravity is normally ~9.8. If the total force is much higher, we are being shaken!
+  // MPU Metrics
   float totalAccel = sqrt(pow(a.acceleration.x, 2) + pow(a.acceleration.y, 2) + pow(a.acceleration.z, 2));
-  
-  if (totalAccel > 15.0) { // 15.0 m/s^2 is a good "vigorous shake" threshold
-      if (eyes.getEmotion() != ANGRY) {
-          eyes.setEmotion(ANGRY);
-          Serial.println("Stop shaking me!");
-      }
+  float totalGyro = sqrt(pow(g.gyro.x, 2) + pow(g.gyro.y, 2) + pow(g.gyro.z, 2));
+
+  // Gaze Stabilization: Shift the ENTIRE eye in the opposite direction of the tilt
+  eyes.setEyeOffset(-a.acceleration.x * 1.5, a.acceleration.y * 1.5);
+
+  // Check Physical Interactions (MPU only)
+  if (totalAccel > 22.0)
+  { // Big Spike (Shake)
+    eyes.setEmotion(ANGRY);
+    emotionOverrideTimer = millis();
+    hasEmotionOverride = true;
+    physicallyMoved = true;
+  }
+  else if (totalGyro > 5.0)
+  { // Fast Spinning (Dizzy)
+    eyes.setEmotion(DIZZY);
+    emotionOverrideTimer = millis();
+    hasEmotionOverride = true;
+    physicallyMoved = true;
+  }
+  else if (abs(a.acceleration.x) > 2.0 || abs(a.acceleration.y) > 2.0)
+  {
+    // Gentle physical movement
+    physicallyMoved = true;
   }
 
-  // B. Gaze Stabilization (Counter-steering the eyes)
-  // When the robot tilts left (X accel changes), the eyes look right to stay level
-  float tiltOffsetX = a.acceleration.y * 0.15; // Tweak 0.15 for sensitivity
-  float tiltOffsetY = a.acceleration.x * 0.15;
+  // --- INTERACTION STATE MACHINE ---
 
-  // Combine Camera Target with Tilt Offset
-  float finalEyeX = camTargetX - tiltOffsetX;
-  float finalEyeY = camTargetY + tiltOffsetY;
+  // A. Waking Up from Sleep - ONLY physical MPU movement can wake
+  if (physicallyMoved)
+  {
+    if (eyes.getEmotion() == SLEEPY || eyes.getEmotion() == ASLEEP)
+    {
+      eyes.setEmotion(WAKEUP);
+      emotionOverrideTimer = millis();
+      hasEmotionOverride = true;
+    }
+    lastInteractionTime = millis();
+  }
 
-  // 3. Render Output
-  eyes.lookAt(finalEyeX, finalEyeY);
+  // B. Camera keeps idle timer alive when awake (cannot wake from sleep)
+  Emotion curEmotion = eyes.getEmotion();
+  if (cameraDetected && curEmotion != SLEEPY && curEmotion != ASLEEP)
+  {
+    lastInteractionTime = millis();
+  }
+
+  // C. Returning to Idle (Neutral Blink)
+  if (hasEmotionOverride && (millis() - emotionOverrideTimer > 3000))
+  {
+    // 3 seconds have passed since the special emotion started
+    eyes.setEmotion(NEUTRAL);
+    hasEmotionOverride = false;
+  }
+
+  // D. Getting Bored / Going to Sleep
+  if (!hasEmotionOverride)
+  {
+    unsigned long idleTime = millis() - lastInteractionTime;
+
+    if (idleTime > 20000)
+    {
+      // 20 Seconds idle: Deep Sleep
+      if (eyes.getEmotion() != ASLEEP)
+        eyes.setEmotion(ASLEEP);
+    }
+    else if (idleTime > 10000)
+    {
+      // 10 Seconds idle: Start getting sleepy
+      if (eyes.getEmotion() != SLEEPY)
+        eyes.setEmotion(SLEEPY);
+    }
+  }
+
+  // Render Frame
   eyes.update();
   eyes.draw(&sprite);
   sprite.pushSprite(0, 0);
 }
 
-// Robust Camera Parsing Function
-void processCameraData() {
-  static unsigned long lastFaceTime = 0;
+// Returns TRUE if a face/motion was actively detected this frame
+bool processCameraData()
+{
+  bool detected = false;
   static String packetBuffer = "";
-  
-  while (Serial1.available()) {
+
+  while (Serial1.available())
+  {
     char c = Serial1.read();
-    
-    if (c == '\n') {
+    if (c == '\n')
+    {
       packetBuffer.trim();
-      
-      if (packetBuffer.startsWith("F:")) {
+      if (packetBuffer.startsWith("F:"))
+      {
         int commaIndex = packetBuffer.indexOf(',');
-        if (commaIndex > 0) {
+        if (commaIndex > 0)
+        {
           String xStr = packetBuffer.substring(2, commaIndex);
           String yStr = packetBuffer.substring(commaIndex + 1);
-          
-          // Update global camera targets
-          camTargetX = xStr.toInt() / 100.0; 
-          camTargetY = yStr.toInt() / 100.0;
-          lastFaceTime = millis();
-          
-          if (eyes.getEmotion() == SLEEPY || eyes.getEmotion() == INNOCENT) {
-             eyes.setEmotion(NEUTRAL);
-          }
+
+          float x = xStr.toInt() / 100.0;
+          float y = yStr.toInt() / 100.0;
+
+          eyes.lookAt(x, y); // Set pupil target
+          detected = true;
         }
       }
-      packetBuffer = ""; 
-    } else {
+      packetBuffer = "";
+    }
+    else
+    {
       packetBuffer += c;
-      if (packetBuffer.length() > 50) packetBuffer = ""; // Safety clear
+      if (packetBuffer.length() > 50)
+        packetBuffer = "";
     }
   }
 
-  // Timeout: If no movement seen for 5 seconds, get sleepy/bored
-  if (millis() - lastFaceTime > 5000) {
-     camTargetX = 0; // Look forward
-     camTargetY = 0;
-     if (eyes.getEmotion() == NEUTRAL) {
-        eyes.setEmotion(SLEEPY); // Robot falls asleep if nothing moves!
-     }
+  // Center pupils if nothing is seen
+  if (!detected && millis() % 100 == 0)
+  {
+    // Very slowly drift pupils back to center when blind
+    eyes.lookAt(0, 0);
   }
+
+  return detected;
 }

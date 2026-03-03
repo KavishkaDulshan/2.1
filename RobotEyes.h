@@ -3,7 +3,8 @@
 
 #include <LovyanGFX.hpp>
 
-enum Emotion { NEUTRAL, HAPPY, ANGRY, SAD, SLEEPY, INNOCENT };
+// Added ASLEEP, DIZZY, and WAKEUP
+enum Emotion { NEUTRAL, HAPPY, ANGRY, SAD, SLEEPY, ASLEEP, INNOCENT, DIZZY, WAKEUP };
 
 class RobotEyes {
   private:
@@ -14,36 +15,36 @@ class RobotEyes {
     int eyeGap = 28;
     int pupilR = 10;
 
-    // --- PHYSICS STATE ---
+    // --- PHYSICS STATE (PUPIL) ---
     float curX = 0, curY = 0;
     float targetX = 0, targetY = 0;
     float easeFactor = 0.2;
 
+    // --- PHYSICS STATE (WHOLE EYE / SCLERA) ---
+    float eyeOffsetX = 0, eyeOffsetY = 0;
+    float targetEyeOffsetX = 0, targetEyeOffsetY = 0;
+
     Emotion currentEmotion = NEUTRAL;
 
-    // Normal Blink (NEUTRAL / ANGRY / SAD / INNOCENT)
+    // Normal Blink
     unsigned long lastBlinkTime = 0;
     int blinkInterval = 3000;
     bool isBlinking = false;
     float blinkState = 0.0;
 
-    // ---- SLEEPY ----
+    // Sleepy/Asleep Physics
     float sleepyLidHeight = 0.0;
     unsigned long lastSleepCheck = 0;
-    // Phase-based state machine
-    // 0=init  1=drooping  2=closed  3=snap_open  4=hold_open
     int sleepPhase = 0;
     unsigned long sleepPhaseTimer = 0;
     float sleepTrembleAngle = 0.0;
-    // Breathing
     float sleepBreathAngle = 0.0;
     float sleepBreathY = 0.0;
-    // Micro-drift when drowsy but partially open
     float sleepMicroDriftX = 0.0;
     float sleepMicroTargetX = 0.0;
     unsigned long lastMicroDrift = 0;
 
-    // ---- HAPPY ----
+    // Happy Physics
     float happyBounceY = 0;
     float happyBounceAngle = 0;
     float happyShimmerAngle = 0.0;
@@ -52,17 +53,18 @@ class RobotEyes {
     unsigned long lastHappyBlinkTime = 0;
     int happyBlinkInterval = 4000;
 
-    // ---- INNOCENT ----
+    // Innocent & Dizzy
     float innocentPulseAngle = 0.0;
+    float dizzyAngle = 0.0;
 
   public:
     void init();
     void update();
     void draw(LGFX_Sprite *spr);
     void lookAt(float x, float y);
+    void setEyeOffset(float x, float y); // NEW: Controls the whole eye tilt
     void setEmotion(Emotion e);
     Emotion getEmotion() { return currentEmotion; } 
-
 
   private:
     void drawEye(LGFX_Sprite *spr, int x, int y, int side);
