@@ -178,14 +178,14 @@ void RobotEyes::drawEye(LGFX_Sprite *spr, int x, int y, int side) {
 
   // ---- SLEEPY: smooth curved eyelid via large-circle arc from above ----
   // A large black circle centered above droops its bottom arc into the eye,
-  // forming a soft organic eyelid curve — nothing like ANGRY sharp triangles.
+  // forming a soft organic eyelid curve ï¿½ nothing like ANGRY sharp triangles.
   if (currentEmotion == SLEEPY) {
     int eyeTop = y - eyeH / 2;
 
     // 1. Full white eye base
     spr->fillRoundRect(x - eyeW/2, eyeTop, eyeW, eyeH, eyeR, TFT_WHITE);
 
-    // 2. Curved eyelid — large circle whose bottom arc IS the lid line
+    // 2. Curved eyelid ï¿½ large circle whose bottom arc IS the lid line
     int lidR = 44;   // large radius = gentle, natural eyelid curvature
 
     // Lid center Y: as sleepyLidHeight goes 0->1, circle sinks into the eye
