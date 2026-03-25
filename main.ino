@@ -2,13 +2,23 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
+#include <driver/i2s.h>
 #include "RobotEyes.h"
+
+// --- EDGE IMPULSE LIBRARY ---
+#include <a2.1-KWS_inferencing.h> 
 
 // --- HARDWARE PINS ---
 #define RX_PIN 18     // Camera RX
 #define TX_PIN 17     // Camera TX
 #define TOUCH_PIN 14  // Capacitive Touch Sensor
 #define VIBE_PIN 13   // Vibrator Motor Module
+
+// I2S Microphone Pins
+#define I2S_WS 15
+#define I2S_SD 7
+#define I2S_SCK 16
+#define I2S_PORT I2S_NUM_0
 
 // Hardware Objects
 Adafruit_MPU6050 mpu;
@@ -28,7 +38,8 @@ public:
     }
     {
       auto cfg = _panel_instance.config();
-      cfg.panel_width = 128; cfg.panel_height = 64; cfg.offset_x = 2;
+      cfg.panel_width = 128; cfg.panel_height = 64;
+      cfg.offset_x = 2;
       _panel_instance.config(cfg);
     }
     setPanel(&_panel_instance);
@@ -41,29 +52,135 @@ LGFX_Sprite sprite(&display);
 // Interaction Logic
 unsigned long lastInteractionTime = 0;
 unsigned long emotionOverrideTimer = 0;
-bool hasEmotionOverride = false; // True when Angry/Dizzy/Wakeup/Happy is playing
+bool hasEmotionOverride = false;
 
 // Touch-to-Happy transition state
 bool wakeupFromTouch = false;
 unsigned long wakeupTouchTime = 0;
-
-// Long-press INNOCENT state
 bool innocentOverride = false;
 unsigned long innocentReleaseTime = 0;
+
+// --- ADVANCED AI AUDIO ARCHITECTURE ---
+#define SAMPLE_RATE 16000
+#define INFER_WINDOW EI_CLASSIFIER_RAW_SAMPLE_COUNT // 24000 samples for 1.5s
+int16_t audio_buffer[INFER_WINDOW];
+int ring_position = 0; // Tracks the oldest sample in the circular buffer
+
+volatile bool keywordDetected = false; 
+TaskHandle_t audioTaskHandle;
+
+// The exact gain from your training data script
+#define GAIN_FACTOR 3  
+
+// --- THE CIRCULAR BUFFER CALLBACK (O(1) Time Complexity) ---
+int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
+  // We seamlessly wrap around the end of the array, extracting chronological audio instantly
+  for (size_t i = 0; i < length; i++) {
+    int buffer_index = (ring_position + offset + i) % INFER_WINDOW;
+    out_ptr[i] = (float)audio_buffer[buffer_index];
+  }
+  return 0;
+}
+
+// The AI Thread running flawlessly on Core 0
+void audioInferenceTask(void *pvParameters) {
+  memset(audio_buffer, 0, sizeof(audio_buffer));
+  ring_position = 0;
+  
+  int samples_since_last_inference = 0;
+  int16_t max_amplitude = 0;
+
+  // Run AI every ~0.33 seconds. This overlaps the frames ensuring the wake word is NEVER cut in half!
+  #define INFERENCE_EVERY_SAMPLES 5333 
+
+  while (true) {
+    #define bufferLen 256
+    int32_t sBuffer[bufferLen];
+    size_t bytesIn = 0;
+    
+    // Read the continuous firehose from the mic
+    esp_err_t result = i2s_read(I2S_PORT, &sBuffer, sizeof(sBuffer), &bytesIn, portMAX_DELAY);
+    
+    if (result == ESP_OK) {
+      int chunk_samples = bytesIn / 4; 
+      
+      for (int i = 0; i < chunk_samples; i++) {
+        int32_t amplified = (sBuffer[i] >> 14) * GAIN_FACTOR;
+        
+        // Prevent static distortion
+        if (amplified > 32767) amplified = 32767;
+        else if (amplified < -32768) amplified = -32768;
+        
+        int16_t sample16 = (int16_t)amplified;
+        
+        // Push to the endless circular buffer
+        audio_buffer[ring_position] = sample16;
+        ring_position = (ring_position + 1) % INFER_WINDOW;
+        
+        if (abs(sample16) > max_amplitude) max_amplitude = abs(sample16);
+        samples_since_last_inference++;
+      }
+    }
+
+    // Trigger AI inference check
+    if (samples_since_last_inference >= INFERENCE_EVERY_SAMPLES) {
+        samples_since_last_inference = 0; 
+        
+        signal_t signal;
+        signal.total_length = INFER_WINDOW;
+        signal.get_data = &microphone_audio_signal_get_data;
+
+        ei_impulse_result_t result = { 0 };
+        EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
+        if (err != EI_IMPULSE_OK) continue;
+
+        float wake_word_score = 0.0;
+        float unknown_score = 0.0;
+        float noise_score = 0.0;
+
+        for (uint16_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+          if (strcmp(result.classification[i].label, "wake_word") == 0) wake_word_score = result.classification[i].value;
+          else if (strcmp(result.classification[i].label, "unknown") == 0) unknown_score = result.classification[i].value;
+          else if (strcmp(result.classification[i].label, "noise") == 0) noise_score = result.classification[i].value;
+        }
+
+        // Only print when there is actual room sound to keep Serial clean
+        if (wake_word_score > 0.10 || unknown_score > 0.10) {
+            Serial.printf("🧠 W: %2.0f%% | U: %2.0f%% | N: %2.0f%%  (Peak: %d)\n", 
+                          wake_word_score * 100, unknown_score * 100, noise_score * 100, max_amplitude);
+        }
+
+        // STRICT LOGIC: Wake word MUST be clearly dominant, rejecting random "unknown" blabbering
+        if (wake_word_score >= 0.75 && wake_word_score > unknown_score) {
+            keywordDetected = true;
+            Serial.println("✅ WAKE WORD TRIGGERED!");
+            
+            // Wipe buffer with silence to prevent the trailing end of the word triggering it again
+            memset(audio_buffer, 0, sizeof(audio_buffer)); 
+            
+            // Force the AI to take a deep breath and wait 1.5 seconds before listening again
+            samples_since_last_inference = -(INFER_WINDOW); 
+        }
+        
+        max_amplitude = 0;
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(1)); 
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN); 
 
-  // Initialize Touch and Haptics
   pinMode(TOUCH_PIN, INPUT);
   pinMode(VIBE_PIN, OUTPUT);
-  analogWrite(VIBE_PIN, 0); // Ensure motor is off
+  analogWrite(VIBE_PIN, 0);
 
   display.init(); display.setBrightness(128); display.setRotation(2);
   sprite.setColorDepth(1); sprite.createSprite(128, 64);
   eyes.init();
-  
+
   if (!mpu.begin()) {
     Serial.println("Failed to find MPU6050");
   } else {
@@ -71,31 +188,57 @@ void setup() {
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
     mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
   }
-  
+
+  // --- INIT I2S MICROPHONE ---
+  const i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 256,
+    .use_apll = false
+  };
+  const i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,
+    .data_out_num = -1,
+    .data_in_num = I2S_SD
+  };
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_PORT, &pin_config);
+  i2s_start(I2S_PORT);
+
+  // --- START AI THREAD ON CORE 0 ---
+  xTaskCreatePinnedToCore(
+    audioInferenceTask, "AudioAI", 8192, NULL, 1, &audioTaskHandle, 0
+  );
+
   lastInteractionTime = millis();
 }
 
 void loop() {
   // ── 1. COLLECT ALL INPUTS ────────────────────────────────────────────────
 
-  bool cameraDetected = processCameraData(); // sets pupil target; returns true if face seen
+  bool cameraDetected = processCameraData();
 
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
   float totalAccel = sqrt(pow(a.acceleration.x,2) + pow(a.acceleration.y,2) + pow(a.acceleration.z,2));
   float totalGyro  = sqrt(pow(g.gyro.x,2)  + pow(g.gyro.y,2)  + pow(g.gyro.z,2));
-
   eyes.setEyeOffset(-a.acceleration.x * 1.5, a.acceleration.y * 1.5);
 
   bool physicallyMoved = false;
   bool strongPhysical  = false;
 
-  if (totalAccel > 22.0) {                                        // Hard shake → Angry
+  if (totalAccel > 22.0) {                                        
       if (!hasEmotionOverride) eyes.setEmotion(ANGRY);
       emotionOverrideTimer = millis();
       hasEmotionOverride   = true;
       physicallyMoved = strongPhysical = true;
-  } else if (totalGyro > 5.0) {                                   // Fast spin → Dizzy
+  } else if (totalGyro > 5.0) {                                   
       if (!hasEmotionOverride) eyes.setEmotion(DIZZY);
       emotionOverrideTimer = millis();
       hasEmotionOverride   = true;
@@ -106,12 +249,11 @@ void loop() {
 
   bool isTouched = (digitalRead(TOUCH_PIN) == HIGH);
   static bool wasTouched = false;
-
-  // Double-tap detection for INNOCENT activation (two taps within 500ms)
+  
   static unsigned long lastTapTime = 0;
   static int tapCount = 0;
   bool risingEdge = isTouched && !wasTouched;
-
+  
   if (risingEdge) {
       unsigned long tapNow = millis();
       if (tapCount > 0 && (tapNow - lastTapTime < 500)) {
@@ -122,7 +264,7 @@ void loop() {
       lastTapTime = tapNow;
   }
   if (tapCount > 0 && (millis() - lastTapTime > 500)) {
-      tapCount = 0; // Window expired
+      tapCount = 0;
   }
 
   Emotion curEmotion = eyes.getEmotion();
@@ -131,17 +273,12 @@ void loop() {
 
   bool isSleeping = (curEmotion == SLEEPY || curEmotion == ASLEEP);
 
-  // Finger lift: start INNOCENT post-release timer and clear transition flags
   if (!isTouched && wasTouched) {
-      if (innocentOverride) {
-          innocentReleaseTime = millis(); // Start 3s post-release timer
-      }
+      if (innocentOverride) innocentReleaseTime = millis();
       wakeupFromTouch = false;
   }
 
-  // D. Double-tap while awake → INNOCENT
-  if (tapCount >= 2 && !innocentOverride && !isSleeping
-      && curEmotion != ANGRY && curEmotion != DIZZY) {
+  if (tapCount >= 2 && !innocentOverride && !isSleeping && curEmotion != ANGRY && curEmotion != DIZZY) {
       eyes.setEmotion(INNOCENT);
       emotionOverrideTimer = millis();
       hasEmotionOverride   = true;
@@ -150,12 +287,28 @@ void loop() {
       tapCount = 0;
   }
 
-  // A. Touch wakes → WAKEUP animation first, then HAPPY
-  if (isTouched) {
-      lastInteractionTime = millis();     // touch always resets idle timer
-
+  // --- NEW: VOICE COMMAND INTEGRATION ---
+  if (keywordDetected) {
+      lastInteractionTime = millis(); // Reset sleep timer
+      keywordDetected = false;        // Consume the flag
+      
       if (isSleeping) {
-          // First touch on a sleeping robot: start WAKEUP
+          eyes.setEmotion(WAKEUP);
+          emotionOverrideTimer = millis();
+          hasEmotionOverride  = true;
+      } else if (curEmotion != ANGRY && curEmotion != DIZZY && !innocentOverride) {
+          eyes.setEmotion(INNOCENT); // Being spoken to makes it look up happily
+          emotionOverrideTimer = millis();
+          hasEmotionOverride   = true;
+          innocentOverride     = true;
+          innocentReleaseTime  = 0;
+      }
+  }
+
+  // A. Touch wakes
+  if (isTouched) {
+      lastInteractionTime = millis();
+      if (isSleeping) {
           if (!wakeupFromTouch) {
               eyes.setEmotion(WAKEUP);
               emotionOverrideTimer = millis();
@@ -163,7 +316,6 @@ void loop() {
               wakeupFromTouch     = true;
               wakeupTouchTime     = millis();
           }
-          // If WAKEUP has played long enough and still touching → go HAPPY
           if (wakeupFromTouch && curEmotion == WAKEUP && (millis() - wakeupTouchTime > 700)) {
               eyes.setEmotion(HAPPY);
               emotionOverrideTimer = millis();
@@ -171,7 +323,6 @@ void loop() {
               wakeupFromTouch      = false;
           }
       } else if (curEmotion == WAKEUP && wakeupFromTouch) {
-          // Still completing the wake-to-happy transition
           if (millis() - wakeupTouchTime > 700) {
               eyes.setEmotion(HAPPY);
               emotionOverrideTimer = millis();
@@ -179,22 +330,19 @@ void loop() {
               wakeupFromTouch      = false;
           }
       } else if (curEmotion == INNOCENT && innocentOverride) {
-          // INNOCENT active – keep it alive while touching
           emotionOverrideTimer = millis();
-      } else if (curEmotion != ANGRY && curEmotion != DIZZY
-                 && curEmotion != WAKEUP && !innocentOverride) {
-          // Single touch while awake → HAPPY
+      } else if (curEmotion != ANGRY && curEmotion != DIZZY && curEmotion != WAKEUP && !innocentOverride) {
           if (curEmotion != HAPPY) {
               eyes.setEmotion(HAPPY);
               emotionOverrideTimer = millis();
               hasEmotionOverride   = true;
           } else {
-              emotionOverrideTimer = millis(); // Refresh timer to keep HAPPY alive
+              emotionOverrideTimer = millis();
           }
       }
   }
 
-  // B. Physical MPU movement wakes from sleep (gentle move only, strong already handled)
+  // B. Physical MPU movement wakes
   if (physicallyMoved) {
       lastInteractionTime = millis();
       if (!strongPhysical && (curEmotion == SLEEPY || curEmotion == ASLEEP)) {
@@ -204,7 +352,7 @@ void loop() {
       }
   }
 
-  // C. Camera face: resets idle timer but CANNOT wake from sleep
+  // C. Camera face
   if (cameraDetected && !isSleeping) {
       lastInteractionTime = millis();
   }
@@ -213,8 +361,7 @@ void loop() {
 
   // ── 3. RETURN TO IDLE ────────────────────────────────────────────────────
   curEmotion = eyes.getEmotion();
-
-  // INNOCENT post-release: hold 3 more seconds after finger lifts, then return to idle
+  
   if (innocentOverride && !isTouched) {
       if (millis() - innocentReleaseTime > 3000) {
           eyes.setEmotion(NEUTRAL);
@@ -223,7 +370,6 @@ void loop() {
       }
   }
 
-  // Generic override timeout (does not fire while INNOCENT is active)
   if (hasEmotionOverride && !isTouched && !innocentOverride && (millis() - emotionOverrideTimer > 3000)) {
       eyes.setEmotion(NEUTRAL);
       hasEmotionOverride = false;
@@ -233,62 +379,46 @@ void loop() {
   if (!hasEmotionOverride && !isTouched && !innocentOverride) {
       unsigned long idleTime = millis() - lastInteractionTime;
       if      (idleTime > 20000 && eyes.getEmotion() != ASLEEP)  eyes.setEmotion(ASLEEP);
-      else if (idleTime > 10000 && eyes.getEmotion() != SLEEPY
-                                && eyes.getEmotion() != ASLEEP)  eyes.setEmotion(SLEEPY);
+      else if (idleTime > 10000 && eyes.getEmotion() != SLEEPY && eyes.getEmotion() != ASLEEP)  eyes.setEmotion(SLEEPY);
   }
 
   // ── 5. HAPTIC OUTPUT ─────────────────────────────────────────────────────
   curEmotion = eyes.getEmotion();
-
   if (isTouched && curEmotion == HAPPY) {
-      // Purr: smooth sweep 135–255 so motor never stalls
       int purr = 195 + (int)(sin(millis() / 30.0) * 60);
       analogWrite(VIBE_PIN, purr);
-
   } else if (curEmotion == INNOCENT) {
-      // Calm heartbeat: lub-dub pattern repeating every 1200ms
       unsigned long t = millis() % 1200;
       if      (t < 100) analogWrite(VIBE_PIN, 120);
       else if (t < 200) analogWrite(VIBE_PIN, 0);
       else if (t < 300) analogWrite(VIBE_PIN, 90);
       else              analogWrite(VIBE_PIN, 0);
-
   } else if (wakeupFromTouch) {
-      // Double-tap buzz when waking via touch
       unsigned long dt = millis() - wakeupTouchTime;
       if      (dt < 80)  analogWrite(VIBE_PIN, 255);
       else if (dt < 160) analogWrite(VIBE_PIN, 0);
       else if (dt < 250) analogWrite(VIBE_PIN, 210);
       else               analogWrite(VIBE_PIN, 0);
-
   } else if (curEmotion == ANGRY && hasEmotionOverride) {
-      // Angry growl: two hard pulses
       unsigned long dt = millis() - emotionOverrideTimer;
       if      (dt < 130) analogWrite(VIBE_PIN, 240);
       else if (dt < 230) analogWrite(VIBE_PIN, 0);
       else if (dt < 360) analogWrite(VIBE_PIN, 210);
       else               analogWrite(VIBE_PIN, 0);
-
   } else if (curEmotion == DIZZY && hasEmotionOverride) {
-      // Dizzy: erratic irregular buzzing
       unsigned long t = millis();
       int wave = 120 + (int)(abs(sin(t / 70.0)) * 110);
       analogWrite(VIBE_PIN, ((t / 110) % 3 == 0) ? wave : 0);
-
   } else if (curEmotion == SLEEPY) {
-      // Gentle breathing pulse: short thump every ~2s
       unsigned long sp = millis() % 2000;
       if      (sp < 150) analogWrite(VIBE_PIN, (int)(sp / 150.0f * 90));
       else if (sp < 300) analogWrite(VIBE_PIN, (int)((300 - sp) / 150.0f * 90));
       else               analogWrite(VIBE_PIN, 0);
-
   } else if (curEmotion == ASLEEP) {
-      // Very slow deep-sleep breathing pulse every ~3.5s
       unsigned long sp = millis() % 3500;
       if      (sp < 200) analogWrite(VIBE_PIN, (int)(sp / 200.0f * 65));
       else if (sp < 400) analogWrite(VIBE_PIN, (int)((400 - sp) / 200.0f * 65));
       else               analogWrite(VIBE_PIN, 0);
-
   } else {
       analogWrite(VIBE_PIN, 0);
   }
@@ -303,7 +433,6 @@ void loop() {
 bool processCameraData() {
   bool detected = false;
   static String packetBuffer = "";
-  
   while (Serial1.available()) {
     char c = Serial1.read();
     if (c == '\n') {
@@ -313,24 +442,21 @@ bool processCameraData() {
         if (commaIndex > 0) {
           String xStr = packetBuffer.substring(2, commaIndex);
           String yStr = packetBuffer.substring(commaIndex + 1);
-          
           float x = xStr.toInt() / 100.0; 
           float y = yStr.toInt() / 100.0;
-          
-          eyes.lookAt(x, y); 
+          eyes.lookAt(x, y);
           detected = true;
         }
       }
-      packetBuffer = ""; 
+      packetBuffer = "";
     } else {
       packetBuffer += c;
-      if (packetBuffer.length() > 50) packetBuffer = ""; 
+      if (packetBuffer.length() > 50) packetBuffer = "";
     }
   }
   
   if (!detected && millis() % 100 == 0) {
       eyes.lookAt(0, 0);
   }
-  
   return detected;
 }
